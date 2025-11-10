@@ -23,7 +23,7 @@ func (w *Writer) Write(v Value) error {
 }
 
 func (w *Writer) EmptyWrite() error {
-	err := w.Write(Value{typ: "string", str: ""})
+	err := w.Write(EmptyValue())
 	if err != nil {
 		return err
 	}

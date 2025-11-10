@@ -5,12 +5,17 @@ import (
 )
 
 var Handlers = map[string]func([]Value) Value{
+	"COMMAND": command,
 	"PING": ping,
 	"SET":  Set,
 	"GET":  Get,
 	"HGET": HGet,
 	"HSET": HSet,
 	"HGETALL": HGetAll,
+}
+
+func command(value []Value) Value {
+	return EmptyValue()
 }
 
 func ping(args []Value) Value {

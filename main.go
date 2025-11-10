@@ -1,16 +1,16 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
+	"os"
+	"os/signal"
 	"strings"
+	"sync"
 )
-
-func closeConn(conn net.Conn) {
-	if err := conn.Close(); err != nil {
-		panic(err)
-	}
-}
 
 func main() {
 	fmt.Println("Listening on port :6379")
@@ -42,54 +42,99 @@ func main() {
 		handler(args)
 	})
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
+	var wg sync.WaitGroup
+	var conns sync.Map
+
+	go func() {
+		<-ctx.Done()
+		fmt.Println("Shutting down...")
+		l.Close()
+
+		conns.Range(func(key, value any) bool {
+			conn := value.(net.Conn)
+			fmt.Println("Closing connection: ", conn.RemoteAddr().String())
+			conn.Close()
+
+			return true
+		})
+	}()
+
 	// Listen for connections
-	conn, err := l.Accept()
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	defer closeConn(conn)
-
 	for {
-		resp := NewResp(conn)
-		value, err := resp.Read()
+		conn, err := l.Accept()
 		if err != nil {
-			fmt.Println(err)
-			return
-		}
-
-		fmt.Println("Command received: ", value.String())
-
-		if value.typ != "array" {
-			fmt.Println("Invalid request, expected array")
-			continue
-		}
-
-		if len(value.array) == 0 {
-			fmt.Println("Invalid request, expected array length > 0")
-			continue
-		}
-
-		writer := NewWriter(conn)
-		command := strings.ToUpper(value.array[0].bulk)
-		args := value.array[1:]
-
-		handler, ok := Handlers[command]
-		if !ok {
-			fmt.Println("Invalid command: ", command)
-			err := writer.EmptyWrite()
-			if err != nil {
-				fmt.Println("Error while creating empty write")
+			select {
+			case <-ctx.Done():
+				wg.Wait()
+				fmt.Println("Shutdown complete.")
+				return
+			default:
+				fmt.Println("Accept error: ", err)
+				continue
 			}
-			continue
 		}
+		fmt.Println("Client connected: ", conn.RemoteAddr().String())
+		conns.Store(conn.RemoteAddr().String(), conn)
+		wg.Add(1)
 
-		if command == "SET" || command == "HSET" {
-			aof.Write(value)
-		}
+		go func(conn net.Conn) {
+			defer wg.Done()
+			defer conns.Delete(conn.RemoteAddr().String())
+			defer func() {
+				_ = conn.Close()
+				fmt.Println("Connection closed: ", conn.RemoteAddr().String())
+			}()
+			defer fmt.Println("Client disconnected: ", conn.RemoteAddr().String())
 
-		result := handler(args)
-		_ = writer.Write(result)
+			resp := NewResp(conn)
+			writer := NewWriter(conn)
+
+			for {
+				value, err := resp.Read()
+
+				if err != nil {
+					if errors.Is(err, net.ErrClosed) || strings.Contains(err.Error(), "use of closed network connection") {
+						// graceful shutdown in progress, just exit silently
+						return
+					}
+					if err != io.EOF {
+						fmt.Println("Read error: ", err)
+					}
+					return
+				}
+
+				fmt.Println("Command received: ", value.String())
+
+				if value.typ != "array" {
+					fmt.Println("Invalid request, expected array")
+					continue
+				}
+
+				if len(value.array) == 0 {
+					fmt.Println("Invalid request, expected array length > 0")
+					continue
+				}
+
+				command := strings.ToUpper(value.array[0].bulk)
+				args := value.array[1:]
+
+				handler, ok := Handlers[command]
+				if !ok {
+					fmt.Println("Invalid command: ", command)
+					_ = writer.EmptyWrite()
+					continue
+				}
+
+				if command == "SET" || command == "HSET" {
+					_ = aof.Write(value)
+				}
+
+				result := handler(args)
+				_ = writer.Write(result)
+			}
+		}(conn)
 	}
 }

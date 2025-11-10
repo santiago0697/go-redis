@@ -66,6 +66,10 @@ func ArrayValue (values []Value) Value {
 	return Value{typ: "array", array: values}
 }
 
+func EmptyValue () Value {
+	return Value{typ: "string", str: ""}
+}
+
 func (v *Value) marshallString() []byte {
 	var buf bytes.Buffer
 	buf.Grow(len(v.str) + 3)
